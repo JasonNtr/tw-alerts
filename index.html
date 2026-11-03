@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>TW Alerts</title>
+<style>
+    :root { --bg: #f6f4ef; --fg: #1d1b16; --muted: #6b665a; --card: #ffffff; --line: #ddd8cb; --accent: #8a3b12; --accent-fg: #ffffff; --ok: #2d6a3a; --bad: #a3271b; }
+    @media (prefers-color-scheme: dark) {
+        :root:not([data-theme="light"]) { --bg: #16140f; --fg: #f1ede2; --muted: #a39d8c; --card: #201d16; --line: #38342a; --accent: #e08a52; --accent-fg: #1a1209; --ok: #6fc283; --bad: #ff8a7a; }
+    }
+    :root[data-theme="dark"] { --bg: #16140f; --fg: #f1ede2; --muted: #a39d8c; --card: #201d16; --line: #38342a; --accent: #e08a52; --accent-fg: #1a1209; --ok: #6fc283; --bad: #ff8a7a; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    main { max-width: 34rem; margin: 0 auto; padding: 24px 16px 48px; }
+    h1 { font-size: 1.5rem; margin: 0 0 4px; }
+    .sub { color: var(--muted); margin: 0 0 20px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin: 0 0 16px; }
+    .status { font-weight: 600; margin: 0 0 8px; }
+    .status.ok { color: var(--ok); }
+    .status.bad { color: var(--bad); }
+    label { display: block; font-size: .875rem; color: var(--muted); margin: 12px 0 4px; }
+    input { width: 100%; font: inherit; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg); }
+    button { font: inherit; font-weight: 600; padding: 12px 16px; border-radius: 10px; border: 1px solid var(--accent); background: var(--accent); color: var(--accent-fg); width: 100%; margin-top: 12px; cursor: pointer; }
+    button.quiet { background: transparent; color: var(--accent); }
+    button:disabled { opacity: .55; cursor: default; }
+    ol { padding-left: 1.25rem; margin: 8px 0 0; }
+    li { margin: 6px 0; }
+    code { background: var(--bg); border: 1px solid var(--line); padding: 1px 5px; border-radius: 5px; font-size: .9em; }
+    .hidden { display: none; }
+</style>
+</head>
+<body>
+<main>
+    <h1>TW Alerts</h1>
+    <p class="sub">Urgent alerts from your Tribal Wars tray app, straight to this phone.</p>
+
+    <section class="card">
+        <p id="status" class="status" role="status">Checking…</p>
+        <p id="detail" class="sub" style="margin:0"></p>
+        <div id="setup" class="hidden">
+            <label for="name">Name of this phone</label>
+            <input id="name" maxlength="40" autocomplete="off">
+            <button id="enable" type="button">Turn on alerts</button>
+        </div>
+        <div id="manage" class="hidden">
+            <button id="again" type="button" class="quiet">Send the pairing code again</button>
+            <button id="off" type="button" class="quiet">Turn off on this phone</button>
+        </div>
+    </section>
+
+    <section class="card" id="loud">
+        <p class="status" style="margin-bottom:4px">Make it sound like an alarm</p>
+        <p class="sub" style="margin:0">Alerts get their own notification category on Android, separate from Discord, so they can have their own sound:</p>
+        <ol>
+            <li>In Discord, type <code>phone test</code> in the control channel.</li>
+            <li>When the alert arrives, press and hold it, then open its <b>Settings</b>.</li>
+            <li>Pick an alarm sound and vibration, set importance to <b>Urgent</b>, and allow it to override <b>Do Not Disturb</b>.</li>
+            <li>Tap <b>Got it</b> on the alert (or swipe it away) to stop it repeating. Left alone, it comes back every minute.</li>
+        </ol>
+    </section>
+</main>
+
+<script>
+(function () {
+    'use strict';
+    var HOOK = /^https:\/\/(discord|discordapp)\.com\/api(\/v\d+)?\/webhooks\/\d{17,20}\/[\w-]{20,}$/;
+    var LOCAL = /^(localhost|127\.0\.0\.1)$/.test(location.hostname);     // for trying the page on this PC; never on the phone
+    var $ = function (id) { return document.getElementById(id); };
+
+    function bytesOf(s) {
+        s = String(s).replace(/-/g, '+').replace(/_/g, '/');
+        while (s.length % 4) s += '=';
+        var bin = atob(s), out = new Uint8Array(bin.length);
+        for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+        return out;
+    }
+    function b64u(buf) {
+        var s = '';
+        new Uint8Array(buf).forEach(function (c) { s += String.fromCharCode(c); });
+        return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    }
+    function validKey(k) { try { var b = bytesOf(k); return b.length === 65 && b[0] === 4; } catch (e) { return false; } }
+    function validHook(h) { return HOOK.test(h) || (LOCAL && /^http:\/\/(localhost|127\.0\.0\.1):\d+\/.+/.test(h)); }
+
+    function store(key, value) { try { localStorage.setItem(key, value); } catch (e) { /* private window: the link must be opened again next time */ } }
+    function recall(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
+    function config() { try { return JSON.parse(recall('tw_phone') || 'null'); } catch (e) { return null; } }
+
+    // What the service worker needs while the page is closed: the webhook to acknowledge through, and what to subscribe with again.
+    function kvSet(pairs) {
+        return new Promise(function (resolve, reject) {
+            var req = indexedDB.open('tw-phone', 1);
+            req.onupgradeneeded = function () { req.result.createObjectStore('kv'); };
+            req.onerror = function () { reject(req.error); };
+            req.onsuccess = function () {
+                var tx = req.result.transaction('kv', 'readwrite'), st = tx.objectStore('kv');
+                Object.keys(pairs).forEach(function (k) { st.put(pairs[k], k); });
+                tx.oncomplete = function () { resolve(); };
+                tx.onerror = function () { reject(tx.error); };
+            };
+        });
+    }
+
+    function say(text, kind, detail) {
+        var s = $('status');
+        s.textContent = text;
+        s.className = 'status' + (kind ? ' ' + kind : '');
+        $('detail').textContent = detail || '';
+    }
+    function show(setup, manage) {
+        $('setup').className = setup ? '' : 'hidden';
+        $('manage').className = manage ? '' : 'hidden';
+    }
+
+    // The pairing link carries the key and the webhook after the #, which the page's host never receives. Keep them, then take
+    // them out of the address bar and the history.
+    function takeLink() {
+        var h = location.hash.replace(/^#/, '');
+        if (!h) return '';
+        var p = new URLSearchParams(h), k = p.get('k') || '', w = p.get('h') || '';
+        try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { /* ignore */ }
+        if (!validKey(k) || !validHook(w)) return 'That link is damaged. Type phone in the Discord control channel for a fresh one.';
+        store('tw_phone', JSON.stringify({ k: k, h: w }));
+        return '';
+    }
+
+    function defaultName() {
+        var saved = recall('tw_phone_name');
+        if (saved) return saved;
+        var m = /Android[^;)]*;\s*([^;)]+)/.exec(navigator.userAgent || '');
+        return (m && m[1].replace(/\s*Build.*$/, '').trim()) || 'phone';
+    }
+
+    function supported() { return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window; }
+
+    function sameBytes(a, b) {
+        a = new Uint8Array(a); b = new Uint8Array(b);
+        if (a.length !== b.length) return false;
+        for (var i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+        return true;
+    }
+
+    function sendCode(cfg, sub, name) {
+        var json = JSON.stringify({ e: sub.endpoint, p: b64u(sub.getKey('p256dh')), a: b64u(sub.getKey('auth')), n: name });
+        return fetch(cfg.h, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content: 'push ' + b64u(new TextEncoder().encode(json)), username: 'TW Phone', allowed_mentions: { parse: [] } })
+        }).then(function (res) {
+            if (!res.ok) throw new Error('Discord answered HTTP ' + res.status + (res.status === 404 ? ' (the link is out of date: ask for a new one)' : ''));
+        });
+    }
+
+    function enable() {
+        var cfg = config();
+        if (!cfg) return;
+        var name = ($('name').value || '').trim().slice(0, 40) || 'phone';
+        store('tw_phone_name', name);
+        $('enable').disabled = true;
+        say('Setting up…', '');
+        // The permission question has to be asked straight from the tap, before anything slow.
+        return Notification.requestPermission().then(function (perm) {
+            if (perm !== 'granted') throw new Error('blocked');
+            return navigator.serviceWorker.register('sw.js');
+        }).then(function () {
+            return navigator.serviceWorker.ready;
+        }).then(function (reg) {
+            var key = bytesOf(cfg.k);
+            return reg.pushManager.getSubscription().then(function (sub) {
+                // A subscription made for another key (the tray app's key changed) can never receive from this one.
+                if (sub && sub.options && sub.options.applicationServerKey && !sameBytes(sub.options.applicationServerKey, key)) return sub.unsubscribe().then(function () { return null; });
+                return sub;
+            }).then(function (sub) {
+                return sub || reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+            }).then(function (sub) {
+                return kvSet({ hook: cfg.h, key: key, name: name }).then(function () { return sendCode(cfg, sub, name); });
+            });
+        }).then(function () {
+            say('Paired.', 'ok', 'The bot confirms in the Discord control channel. Then type phone test there.');
+            show(false, true);
+        }).catch(function (e) {
+            if (e && e.message === 'blocked') {
+                say('Notifications are blocked.', 'bad', 'In Chrome: ⋮ → Settings → Site settings → Notifications, allow this site, then open this page again.');
+            } else {
+                say('That did not work.', 'bad', String((e && e.message) || e));
+            }
+            $('enable').disabled = false;
+        });
+    }
+
+    function again() {
+        var cfg = config(), name = ($('name').value || defaultName()).trim().slice(0, 40) || 'phone';
+        return navigator.serviceWorker.ready.then(function (reg) { return reg.pushManager.getSubscription(); }).then(function (sub) {
+            if (!sub) throw new Error('This phone has no subscription any more. Turn alerts on again.');
+            return sendCode(cfg, sub, name);
+        }).then(function () { say('Sent again.', 'ok', 'The bot answers in the Discord control channel.'); })
+          .catch(function (e) { say('That did not work.', 'bad', String((e && e.message) || e)); });
+    }
+
+    function off() {
+        return navigator.serviceWorker.getRegistration().then(function (reg) { return reg && reg.pushManager.getSubscription(); }).then(function (sub) {
+            return sub && sub.unsubscribe();
+        }).then(function () {
+            say('Alerts are off on this phone.', '', 'Type phone list and phone remove in Discord to forget it there too.');
+            show(true, false);
+            $('enable').disabled = false;
+        }).catch(function (e) { say('That did not work.', 'bad', String((e && e.message) || e)); });
+    }
+
+    function start() {
+        var problem = takeLink();
+        $('name').value = defaultName();
+        $('enable').addEventListener('click', enable);
+        $('again').addEventListener('click', again);
+        $('off').addEventListener('click', off);
+        if (!supported()) { say('This browser cannot receive alerts.', 'bad', 'Use Chrome on Android.'); show(false, false); return; }
+        if (problem) { say(problem, 'bad'); show(false, false); return; }
+        if (!config()) { say('Open this page from the link in Discord.', 'bad', 'Type phone in the control channel; the bot answers with a link to open here.'); show(false, false); return; }
+        if (Notification.permission === 'denied') { say('Notifications are blocked.', 'bad', 'In Chrome: ⋮ → Settings → Site settings → Notifications, allow this site, then open this page again.'); show(false, false); return; }
+        navigator.serviceWorker.getRegistration().then(function (reg) { return reg && reg.pushManager.getSubscription(); }).then(function (sub) {
+            if (sub && Notification.permission === 'granted') { say('Alerts are on for this phone.', 'ok', 'Type phone test in Discord to hear one.'); show(false, true); }
+            else { say('Ready.', '', 'Tap the button, then allow notifications.'); show(true, false); }
+        }).catch(function () { say('Ready.', '', 'Tap the button, then allow notifications.'); show(true, false); });
+    }
+
+    start();
+})();
+</script>
+</body>
+</html>
