@@ -153,6 +153,24 @@
         });
     }
 
+    // Chrome sometimes cannot register a NEW key with Google's push service straight after the old subscription was dropped
+    // ("Registration failed - push service error", an AbortError). Starting the worker over and trying once more clears it.
+    function subscribeOnce(reg, key) {
+        return reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key }).catch(function (e) {
+            if (!e || e.name !== 'AbortError') throw e;
+            var pause = typeof window.twRetryMs === 'number' ? window.twRetryMs : 1500;
+            return reg.unregister().then(function () {
+                return new Promise(function (r) { setTimeout(r, pause); });
+            }).then(function () {
+                return navigator.serviceWorker.register('sw.js');
+            }).then(function () {
+                return navigator.serviceWorker.ready;
+            }).then(function (reg2) {
+                return reg2.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+            });
+        });
+    }
+
     function enable() {
         var cfg = config();
         if (!cfg) return;
@@ -173,7 +191,7 @@
                 if (sub && sub.options && sub.options.applicationServerKey && !sameBytes(sub.options.applicationServerKey, key)) return sub.unsubscribe().then(function () { return null; });
                 return sub;
             }).then(function (sub) {
-                return sub || reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+                return sub || subscribeOnce(reg, key);
             }).then(function (sub) {
                 return kvSet({ hook: cfg.h, key: key, name: name }).then(function () { return sendCode(cfg, sub, name); });
             });
@@ -183,6 +201,12 @@
         }).catch(function (e) {
             if (e && e.message === 'blocked') {
                 say('Notifications are blocked.', 'bad', 'In Chrome: ⋮ → Settings → Site settings → Notifications, allow this site, then open this page again.');
+            } else if (e && e.name === 'AbortError') {
+                // The browser could not register with Google's push service. Not our key, not the link: the phone, its data or its network.
+                say('Your phone could not reach the Google push service.', 'bad',
+                    'Try, in order: (1) Chrome ⋮ → Settings → Site settings → All sites → this site → Clear & reset, then open the link again. ' +
+                    '(2) Turn off any VPN, private DNS or ad blocker, and try Wi-Fi instead of mobile data (or the other way round). ' +
+                    '(3) Make sure Google Play services is up to date and the date and time on the phone are automatic. (' + String(e.message || e.name) + ')');
             } else {
                 say('That did not work.', 'bad', String((e && e.message) || e));
             }
