@@ -64,6 +64,8 @@ function show(raw) {
         timestamp: typeof d.at === 'number' ? d.at : Date.now(),
         data: { id: id, urgent: urgent }
     };
+    // A drawn battle report, uploaded to the owner's own Discord channel. Only Discord's attachment hosts are ever fetched, whatever the push says.
+    if (/^https:\/\/(cdn\.discordapp\.com|media\.discordapp\.net)\/[^\s]{1,500}$/.test(String(d.image || ''))) options.image = String(d.image);
     if (urgent && id) options.actions = [{ action: 'ack', title: 'Got it' }];
     return self.registration.showNotification(String(d.title || 'TW alert').slice(0, 100), options);
 }
